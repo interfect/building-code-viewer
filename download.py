@@ -15,12 +15,13 @@ import argparse
 import sys
 import os
 import urllib.request
+from urllib.error import URLError
 import json
 import time
 
-from typing import Iterator
+from typing import Iterator, Dict, List, Tuple
 
-def parse_args(args: list[str]):
+def parse_args(args: List[str]):
     """
     Parse command-line options
     """
@@ -29,11 +30,13 @@ def parse_args(args: list[str]):
     parser = argparse.ArgumentParser(description=__doc__, 
         formatter_class=argparse.RawDescriptionHelpFormatter)
     
-    parser.add_argument("document-id", type=int, required=True,
+    parser.add_argument("document_id", type=int,
         help="Document ID of the document to download.")
     parser.add_argument("--base-directory", type=str, default=".",
         help=("Directory into which to download the document. An api/ "
         "directory will be created here and API responses will be saved."))
+    parser.add_argument("--combined-document", type=argparse.FileType('w'),
+        help=("Save combined XML to this file"))
     
     return parser.parse_args(args[1:])
     
@@ -49,7 +52,7 @@ class APIProxy:
         :param base_directory: The directory to cache the API responses in.
         """
         self.api_directory = os.path.join(base_directory, 'api')
-        os.makedirs(self.api_directory, exists_ok=True)
+        os.makedirs(self.api_directory, exist_ok=True)
         self.base_url = 'https://codes.iccsafe.org/api/'
         
     def fetch(self, relative_url: str) -> str:
@@ -70,19 +73,28 @@ class APIProxy:
         
         # Make sure parent directory exists
         destination_parent = os.path.dirname(destination_path)
-        os.makedirs(destination_parent, exists_ok=True)
+        os.makedirs(destination_parent, exist_ok=True)
         
-        with urllib.request.urlopen(self.base_url + '/' + relative_url) as response:
+        full_url = self.base_url + relative_url
+        print(f"Fetch: {full_url}")
+        
+        with urllib.request.urlopen(full_url) as response:
+            # Check the status
+            status = response.status
+            reason = response.reason
+            print(f"Response: {status} {reason}")
+            if status != 200:
+                raise URLError(reason)
             # Get the content
             content = response.read()
             
-        with open(destination_path, 'w') as out_file:
+        with open(destination_path, 'wb') as out_file:
             out_file.write(content)
         
         # Rate limit
-        time.sleep(5)
+        time.sleep(1)
         
-        return content
+        return content.decode('utf-8')
         
     def get_info(self, document_id: int) -> dict:
         """
@@ -97,7 +109,7 @@ class APIProxy:
         assert isinstance(info, dict)
         return info
         
-    def get_toc(self, document_id: int) -> list[dict]:
+    def get_toc(self, document_id: int) -> List[dict]:
         """
         Get the document table of contents JSON for the given document and
         parse it.
@@ -112,7 +124,7 @@ class APIProxy:
         assert isinstance(toc, list)
         return toc
         
-     def get_content(self, document_id: int, content_id: int) -> str:
+    def get_content(self, document_id: int, content_id: int) -> str:
         """
         Get the string containing the XML content for part of the document.
         """
@@ -131,7 +143,7 @@ class APIProxy:
         for content_id, _ in self.for_each_content_parsed(document_id):
             yield content_id
                 
-    def for_each_content_parsed(self, document_id: int) -> Iterator[tuple[int, str]]:
+    def for_each_content_parsed(self, document_id: int) -> Iterator[Tuple[int, str]]:
         """
         Loop over pairs of the content IDs and section titles of all the nested
         table of contents items in the given document.
@@ -150,7 +162,7 @@ class APIProxy:
                 yield content_id, title
                 
         
-     def for_each_content_entry(self, document_id: int) -> Iterator[dict]:
+    def for_each_content_entry(self, document_id: int) -> Iterator[dict]:
         """
         Loop over the ToC entry dicts of all the nested table of contents items
         in the given document.
@@ -182,7 +194,7 @@ class APIProxy:
             
         
             
-def main(args: list[str]) -> int:
+def main(args: List[str]) -> int:
     """
     Main entry point of the program.
     """
@@ -191,16 +203,38 @@ def main(args: list[str]) -> int:
     
     api = APIProxy(options.base_directory)
     document_id = options.document_id
+    # We may be combining to a stream
+    combined_document = options.combined_document
     
     info = api.get_info(document_id)
     title = info.get('title')
     print(f"Downloading document {document_id}: {title}")
+    content_type = info.get('content_type')
+    if content_type is not None and content_type != "ICC XML":
+        print(f"Error: we only support ICC XML documents, but content_type is {content_type}")
+        sys.exit(1)
+        
+    if combined_document:
+        combined_document.write(f'<html>\n<head>\n<title>{title}</title>\n</head>\n<body>\n<h1>{title}</h1>\n')
+        
+    entry_count = 0
+    for _ in api.for_each_content_id(document_id):
+        entry_count += 1
+    print(f"Going to download {entry_count} entries...")
     
     for content_id, section_title in api.for_each_content_parsed(document_id):
         print(f"Downloading content {content_id}: {section_title}")
         content = api.get_content(document_id, content_id)
-        print(f"Content: {content[:100]}")
-        sys.exit(1)
+        print(f"Content: \"{content[:1024]}\"...")
+        
+        if combined_document:
+            combined_document.write('\n')
+            combined_document.write(content)
+            combined_document.write('\n')
+            combined_document.flush()
+        
+    if combined_document:
+        combined_document.write(f'\n</body></html>\n')
     
     return 0
     
