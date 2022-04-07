@@ -40,7 +40,7 @@ class TokenBucket:
         # Work out how long it has been since the last time we issued a token for
         elapsed_time = now - self.current_to
         # Figure out how many whole periods to do
-        elapsed_periods = elapsed_time.total_seconds() / token_period
+        elapsed_periods = elapsed_time.total_seconds() / self.token_period
         whole_periods = int(math.floor(elapsed_periods))
         # Figure out the remaining partial period
         unused_seconds = (elapsed_periods - whole_periods) * self.token_period
@@ -72,7 +72,7 @@ class APIClient:
     content ought to be static, we can just cache data on disk as files and
     save bandwidth and latency when we want the same thing again later.
     """
-    def __init__(self, base_directory: str, token_period: float = 1, token_limit: int = 5) -> None:
+    def __init__(self, base_directory: str, token_period: float = 1.5, token_limit: int = 5) -> None:
         """
         Make a new proxy.
         
@@ -109,25 +109,40 @@ class APIClient:
         else:
             # We need to download and cache.
             print(f"Fetch: {full_url}")
-            # Don't go too fast
-            self.limiter.take()
             # Make sure parent directory exists
             destination_parent = os.path.dirname(destination_path)
             os.makedirs(destination_parent, exist_ok=True)
             
             # Make a temp file to download to. THe API endpoints never look
             # like this so it can't conflict.
-            temp_path = os.mkstemp(dir=destination_parent) 
+            temp_fd, temp_path = tempfile.mkstemp(dir=destination_parent)
+            os.close(temp_fd)
             
-            with urllib.request.urlopen(full_url) as response:
-                # Check the status
-                status = response.status
-                reason = response.reason
-                print(f"Response: {status} {reason}")
-                if status != 200:
-                    raise URLError(reason)
-                # Get the content
-                content = response.read()
+            got_content = False
+            for attempt in range(4):
+                try:
+                    # Don't go too fast
+                    self.limiter.take()
+                    with urllib.request.urlopen(full_url) as response:
+                        # Check the status
+                        status = response.status
+                        reason = response.reason
+                        print(f"Response: {status} {reason}")
+                        if status != 200:
+                            raise URLError(reason)
+                        # Get the content
+                        content = response.read()
+                        # We got it
+                        got_content = True
+                        break
+                except TimeoutError as timeout_error:
+                    delay = 2 ** attempt
+                    print(f"Connection timed out. Retry in {delay} seconds")
+                    time.sleep(delay)
+            if not got_content:
+                # Reraise the most recent exception
+                raise timeout_error
+                
                 
             with open(temp_path, 'wb') as out_file:
                 out_file.write(content)
@@ -169,6 +184,9 @@ class APIClient:
     def get_content(self, document_id: int, content_id: int) -> str:
         """
         Get the string containing the XML content for part of the document.
+        
+        The content probably has an unterminated <section> tag, if there are
+        children in the ToC.
         """
         
         content_json = self.fetch(f'content/chapter-xml/{document_id}/{content_id}')
@@ -176,22 +194,14 @@ class APIClient:
         assert isinstance(content, str)
         return content
         
-    def for_each_content_id(self, document_id: int) -> Iterator[int]:
+    def for_each_content_parsed(self, document_id: int) -> Iterator[Tuple[int, int, str]]:
         """
-        Loop over the content IDs of all the nested table of contents items in
-        the given document.
-        """
-        
-        for content_id, _ in self.for_each_content_parsed(document_id):
-            yield content_id
-                
-    def for_each_content_parsed(self, document_id: int) -> Iterator[Tuple[int, str]]:
-        """
-        Loop over pairs of the content IDs and section titles of all the nested
-        table of contents items in the given document.
+        Loop over tuples of the nesting level (starting from 0), contnet ID,
+        and section title, for all the nested table of contents items in the
+        given document.
         """
         
-        for toc_entry in self.for_each_content_entry(document_id):
+        for nesting_level, toc_entry in self.for_each_content_entry(document_id):
             content_id = toc_entry.get('content_id')
             if content_id is not None and isinstance(content_id, int):
                 # We have to send this. Does it have a title?
@@ -201,33 +211,34 @@ class APIClient:
                     title = toc_entry.get('link', {}).get('title')
                 if not isinstance(title, str):
                     title = None
-                yield content_id, title
+                yield nesting_level, content_id, title
                 
         
-    def for_each_content_entry(self, document_id: int) -> Iterator[dict]:
+    def for_each_content_entry(self, document_id: int) -> Iterator[Tuple[int, dict]]:
         """
-        Loop over the ToC entry dicts of all the nested table of contents items
-        in the given document.
+        Loop over the nesting levels and ToC entry dicts of all the nested
+        table of contents items in the given document.
         """
         
         toc = self.get_toc(document_id)
         assert isinstance(toc, list)
         
-        def for_each_child_recursive(toc_dict: dict) -> Iterator[dict]:
+        def for_each_child_recursive(nesting_level: int, toc_dict: dict) -> Iterator[Tuple[int, dict]]:
             """
-            Go through each child TOC dict under the given one and yield it.
-            Then yield all its children recursively.
+            Go through each child TOC dict under the given one and yield it, at
+            the given nesting level. Then yield all its children recursively at
+            higher nesting levels.
             """
             children = toc_dict.get('sub_sections')
             if isinstance(children, list):
                 for child in children:
                     if isinstance(child, dict):
-                        yield child
-                        for subchild in for_each_child_recursive(child):
-                            yield subchild
+                        yield nesting_level, child
+                        for sub_pair in for_each_child_recursive(nesting_level + 1, child):
+                            yield sub_pair
         
         for root_item in toc:
             if isinstance(root_item, dict):
-                yield root_item
-                for nested_item in for_each_child_recursive(root_item):
-                    yield nested_item 
+                yield 0, root_item
+                for sub_pair in for_each_child_recursive(1, root_item):
+                    yield sub_pair 
