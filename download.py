@@ -19,6 +19,7 @@ import textwrap
 from typing import Iterator, Dict, List, Tuple
 
 from api import APIClient
+from fragment_parser import Element, parse_to_subtrees
 
 def parse_args(args: List[str]) -> argparse.Namespace:
     """
@@ -48,7 +49,9 @@ def main(args: List[str]) -> int:
     
     options = parse_args(args)
     
+    # Set up the API client
     api = APIClient(options.base_directory)
+    
     document_id = options.document_id
     # We may be combining to a stream
     combined_document = options.combined_document
@@ -183,11 +186,9 @@ def main(args: List[str]) -> int:
         entry_count += 1
     print(f"Going to download {entry_count} entries...")
     
-    # Sections with children need their section tags closed when we leave them.
+    # Sections with children need their tags closed when we leave them.
     last_nesting_level = 0
-    # Some sections weirdly don't terminate
-    last_section_closed = True
-   
+    
     for i, (nesting_level, content_id, section_title) in enumerate(api.for_each_content_parsed(document_id)):
         if nesting_level != last_nesting_level:
             print(f"Changing nesting level {last_nesting_level} -> {nesting_level}")
@@ -195,36 +196,25 @@ def main(args: List[str]) -> int:
         content = api.get_content(document_id, content_id)
         
         if combined_document:
-            if nesting_level == last_nesting_level and not last_section_closed:
-                # We didn't change nesting levels, but we also didn't close the
-                # last section. Close it ourselves.
-                print(f"Closing unterminated section at nesting level {nesting_level}")
-                for _ in range(nesting_level):
-                    # Indent the close
-                    combined_document.write('    ')
-                combined_document.write('</section>\n')
-            if nesting_level < last_nesting_level:
-                # We need to close some section tags first.
-                for levels_removed in range(last_nesting_level - nesting_level):
-                    for _ in range(nesting_level - levels_removed):
-                        # Indent the close
-                        combined_document.write('    ')
-                    combined_document.write('</section>\n')
-        
-            combined_document.write('\n')
-            for _ in range(nesting_level):
-                # Indent the content
-                combined_document.write('    ')
-            combined_document.write(content)
-            combined_document.write('\n')
-            
+            # Now parse, accepting unterminated tags
+            top_level_nodes = parse_to_subtrees(content)
+            for node in top_level_nodes:
+                # TODO: Actually nest?
+                if isinstance(node, Element):
+                    # It's a subtree
+                    if (not node.is_self_closing) and (not node.is_closed):
+                        # Make it closed
+                        print(f"Closing unclosed {node.tag_name} tag")
+                        node.is_closed = True
+                    node.write_to(combined_document)
+                    combined_document.write('\n')
+                else:
+                    # It's just text
+                    combined_document.write(node)
+                    combined_document.write('\n')
             combined_document.flush()
         
         last_nesting_level = nesting_level
-        if content.endswith('</section>'):
-            last_section_closed = True
-        else:
-            last_section_closed = False
         
         if i + 1 >= options.max_sections:
             break

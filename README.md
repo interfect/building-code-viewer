@@ -23,7 +23,7 @@ That will print the document ID, in this case `1240`.
 
 ### Downloader
 
-Currently the only implemented tool is a downloader, `download.py`. If provided an ICC document ID, it will go through the table of contents for the document and download all the sections at a reasonable rate, stopping if an error is encountered.
+Currently the only implemented tool is a downloader, `download.py`. If provided an ICC document ID, it will go through the table of contents for the document and download all the sections at a reasonable rate, retrying with exponential backoff if an error is encountered.
 
 For example, to download the current North Carolina state building code, you can do:
 

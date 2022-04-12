@@ -1,3 +1,7 @@
+"""
+api.py: Bindings for the International Code Council's API.
+"""
+
 import sys
 import math
 import os
@@ -9,10 +13,6 @@ import tempfile
 from datetime import datetime, timedelta
 
 from typing import Iterator, Dict, List, Tuple
-
-"""
-api.py: Bindings for the International Code Council's API.
-"""
 
 class TokenBucket:
     """
